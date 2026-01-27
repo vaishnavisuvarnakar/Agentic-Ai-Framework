@@ -13,5 +13,11 @@ transformers
 torch
 scipy
 
+# PDF Processing
+PyMuPDF>=1.23.0
+
+# LLM API (Google Gemini)
+google-generativeai>=0.3.0
+
 # Additional utilities
 typing_extensions>=4.0.0
