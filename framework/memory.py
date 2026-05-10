@@ -109,7 +109,7 @@ class InMemoryBackend(MemoryBackend):
                 entry.updated_at = datetime.now()
                 if tags:
                     entry.tags = tags
-                if ttl:
+                if ttl is not None:
                     entry.ttl = ttl
             else:
                 # Check max size and evict LRU if needed
@@ -215,7 +215,7 @@ class FileBackend(MemoryBackend):
                 entry.updated_at = datetime.now()
                 if tags:
                     entry.tags = tags
-                if ttl:
+                if ttl is not None:
                     entry.ttl = ttl
             else:
                 self._cache[key] = MemoryEntry(
