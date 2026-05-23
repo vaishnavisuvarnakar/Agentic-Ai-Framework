@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, Optional, List, TYPE_CHECKING
 from dataclasses import dataclass, field
 from datetime import datetime
 import traceback
+import concurrent.futures
 
 if TYPE_CHECKING:
     from .tools import ToolRegistry
@@ -151,7 +152,18 @@ class Task:
                 start_time = time.time()
                 
                 # Actual task execution
-                output = self._run(context)
+                if self.timeout is not None:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(self._run, context)
+                        try:
+                            output = future.result(timeout=self.timeout)
+                        except concurrent.futures.TimeoutError:
+                            # Note: the underlying thread cannot be forcefully killed in Python.
+                            # The executor will wait for it on __exit__, but the TimeoutError
+                            # is raised to the caller immediately.
+                            raise TimeoutError(f"Task '{self.name}' timed out after {self.timeout}s")
+                else:
+                    output = self._run(context)
                 
                 execution_time = time.time() - start_time
                 
@@ -161,6 +173,7 @@ class Task:
                     execution_time=execution_time,
                     retries_used=retries
                 )
+                
                 self.status = TaskStatus.COMPLETED
                 self.completed_at = datetime.now()
                 
@@ -390,3 +403,4 @@ class ConditionalTask(Task):
             "condition_result": result,
             "next_task": self.true_task if result else self.false_task
         }
+
