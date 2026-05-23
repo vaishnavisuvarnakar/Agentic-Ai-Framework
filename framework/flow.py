@@ -552,6 +552,7 @@ class Flow:
                             success=False,
                             error=str(e)
                         )
+                        failed.add(task_name)
         
         return task_results, errors
     
