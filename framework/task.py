@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, Optional, List, TYPE_CHECKING
 from dataclasses import dataclass, field
 from datetime import datetime
 import traceback
+import concurrent.futures
 
 if TYPE_CHECKING:
     from .tools import ToolRegistry
@@ -17,16 +18,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Global flow logger reference (set by Flow during execution)
+# Process-global fallback logger (single-flow / legacy usage only).
+# Concurrent flows must bind a logger per-task via task._flow_logger instead
+# of relying on this global, which is overwritten by the last Flow.execute()
+# call and therefore unsafe under concurrent execution.
 _flow_logger: Optional["FlowLogger"] = None
 
 def set_task_flow_logger(flow_logger: "FlowLogger") -> None:
-    """Set the flow logger for task-level logging."""
+    """Set the process-global flow logger (single-flow use only)."""
     global _flow_logger
     _flow_logger = flow_logger
 
 def get_task_flow_logger() -> Optional["FlowLogger"]:
-    """Get the current flow logger."""
+    """Get the process-global flow logger."""
     return _flow_logger
 
 
@@ -98,6 +102,8 @@ class Task:
     
     def add_dependency(self, task_name: str) -> "Task":
         """Add a task dependency (this task will wait for the dependency)."""
+        if task_name == self.name:
+            raise ValueError(f"Task '{self.name}' cannot depend on itself")
         if task_name not in self.dependencies:
             self.dependencies.append(task_name)
         return self
@@ -146,7 +152,18 @@ class Task:
                 start_time = time.time()
                 
                 # Actual task execution
-                output = self._run(context)
+                if self.timeout is not None:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(self._run, context)
+                        try:
+                            output = future.result(timeout=self.timeout)
+                        except concurrent.futures.TimeoutError:
+                            # Note: the underlying thread cannot be forcefully killed in Python.
+                            # The executor will wait for it on __exit__, but the TimeoutError
+                            # is raised to the caller immediately.
+                            raise TimeoutError(f"Task '{self.name}' timed out after {self.timeout}s")
+                else:
+                    output = self._run(context)
                 
                 execution_time = time.time() - start_time
                 
@@ -156,6 +173,7 @@ class Task:
                     execution_time=execution_time,
                     retries_used=retries
                 )
+                
                 self.status = TaskStatus.COMPLETED
                 self.completed_at = datetime.now()
                 
@@ -178,8 +196,9 @@ class Task:
                     self.status = TaskStatus.RETRYING
                     delay = self.retry_delay * (2 ** (retries - 1))  # Exponential backoff
                     
-                    # Log retry with FlowLogger if available
-                    flow_log = get_task_flow_logger()
+                    # Per-task logger (set by Flow at submit time) takes priority
+                    # over the process-global to avoid cross-flow log corruption.
+                    flow_log = getattr(self, '_flow_logger', None) or get_task_flow_logger()
                     if flow_log:
                         flow_log.task_retry(
                             task_name=self.name,
@@ -274,27 +293,46 @@ class FunctionTask(Task):
 
 
 class LLMTask(Task):
-    """Task for LLM-based processing."""
-    
+    """Task for LLM-based processing with optional rate limiting."""
+
     def __init__(
         self,
         name: str,
         prompt_template: str,
         llm_handler: Optional[Callable] = None,
+        rate_limiter=None,   # accepts a RateLimiter instance
         **kwargs
     ):
         super().__init__(name, task_type="llm", **kwargs)
         self.prompt_template = prompt_template
         self.llm_handler = llm_handler
-    
+        self.rate_limiter = rate_limiter  # per-task rate limiter (optional)
+
     def _run(self, context: Dict[str, Any]) -> Any:
+        # Import here to avoid circular imports
+        from .rate_limiter import get_global_rate_limiter
+
+        # Determine which rate limiter to use
+        # Per-task limiter takes priority over global limiter
+        active_limiter = self.rate_limiter or get_global_rate_limiter()
+
+        # Acquire rate limit slot before making the LLM call
+        if active_limiter:
+            active_limiter.acquire(task_name=self.name)
+
         # Format the prompt with context
-        prompt = self.prompt_template.format(**context)
-        
+        try:
+            prompt = self.prompt_template.format(**context)
+        except KeyError as e:
+            raise ValueError(
+                f"Prompt template requires key {e} "
+                f"but it's not in context. Available: {list(context.keys())}"
+            ) from e
+
         if self.llm_handler:
             return self.llm_handler(prompt)
-        
-        # If no handler, return the formatted prompt (for external processing)
+
+        # If no handler, return the formatted prompt for external processing
         return {"prompt": prompt, "requires_llm": True}
 
 
@@ -365,3 +403,4 @@ class ConditionalTask(Task):
             "condition_result": result,
             "next_task": self.true_task if result else self.false_task
         }
+

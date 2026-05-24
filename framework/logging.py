@@ -555,6 +555,9 @@ class FlowLogger:
         **extra
     ) -> Dict[str, Any]:
         """Create a structured log entry."""
+        # Safe serialization for extra kwargs
+        safe_extra = {k: (v if isinstance(v, (int, float, str, bool, type(None), list, dict)) else str(v)) for k, v in extra.items()}
+        
         return {
             "timestamp": datetime.now().isoformat(),
             "event_type": event_type,
@@ -563,7 +566,7 @@ class FlowLogger:
             "flow_id": flow_id,
             "flow_name": flow_name,
             "task_name": task_name,
-            **extra
+            **safe_extra
         }
     
     # -------------------------------------------------------------------------
@@ -775,13 +778,14 @@ class FlowLogger:
         if not self._all_flows_log.exists():
             return []
         
-        logs = []
+        import collections
+        logs = collections.deque(maxlen=limit)
         with open(self._all_flows_log, "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
                     logs.append(json.loads(line))
         
-        return logs[-limit:]
+        return list(logs)
     
     def get_error_summary(self) -> Dict[str, Any]:
         """Get summary of recent errors."""

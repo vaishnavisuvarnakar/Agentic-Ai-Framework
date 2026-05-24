@@ -61,12 +61,14 @@ class Flow:
         max_workers: int = 4,
         memory_store: Optional[MemoryStore] = None,
         tool_registry: Optional[ToolRegistry] = None,
-        flow_logger: Optional[FlowLogger] = None
+        flow_logger: Optional[FlowLogger] = None,
+        stop_on_failure: bool = True
     ):
         self.name = name
         self.description = description
         self.flow_id = str(uuid.uuid4())
         self.max_workers = max_workers
+        self.stop_on_failure = stop_on_failure
         
         # Task management
         self._tasks: Dict[str, Task] = {}
@@ -369,7 +371,8 @@ class Flow:
         
         for task_name in execution_order:
             task = self._tasks[task_name]
-            
+            task._flow_logger = self.flow_log
+
             # Log task start
             self.flow_log.task_start(
                 task_name=task_name,
@@ -428,8 +431,8 @@ class Flow:
                     except Exception as e:
                         logger.warning(f"Task failure callback failed: {e}")
                 
-                # Stop on first failure (can be made configurable)
-                break
+                if self.stop_on_failure:
+                    break
         
         # Check if flow was interrupted by failure
         if len(task_results) < len(execution_order):
@@ -464,7 +467,12 @@ class Flow:
                 for task_name in ready:
                     task = self._tasks[task_name]
                     task.status = TaskStatus.RUNNING
-                    
+                    # Bind this flow's logger to the task before submission so
+                    # that retry log calls inside worker threads always reach the
+                    # correct FlowLogger even when other flows are executing
+                    # concurrently and overwriting the process-global.
+                    task._flow_logger = self.flow_log
+
                     # Log task start
                     self.flow_log.task_start(
                         task_name=task_name,
@@ -546,6 +554,7 @@ class Flow:
                             success=False,
                             error=str(e)
                         )
+                        failed.add(task_name)
         
         return task_results, errors
     
@@ -593,6 +602,7 @@ class Flow:
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "stop_on_failure": self.stop_on_failure,
             "tasks": {name: task.to_dict() for name, task in self._tasks.items()},
             "entry_tasks": list(self._entry_tasks)
         }
@@ -644,6 +654,10 @@ class FlowBuilder:
     
     def chain(self, *task_names: str) -> "FlowBuilder":
         self._flow.chain(*task_names)
+        return self
+    
+    def stop_on_failure(self, stop: bool) -> "FlowBuilder":
+        self._flow.stop_on_failure = stop
         return self
     
     def build(self) -> Flow:

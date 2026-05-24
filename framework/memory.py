@@ -109,7 +109,7 @@ class InMemoryBackend(MemoryBackend):
                 entry.updated_at = datetime.now()
                 if tags:
                     entry.tags = tags
-                if ttl:
+                if ttl is not None:
                     entry.ttl = ttl
             else:
                 # Check max size and evict LRU if needed
@@ -153,6 +153,9 @@ class InMemoryBackend(MemoryBackend):
     
     def get_all_entries(self) -> List[MemoryEntry]:
         with self._lock:
+            expired = [k for k, v in self._store.items() if v.is_expired()]
+            for k in expired:
+                del self._store[k]
             return list(self._store.values())
 
 
@@ -215,7 +218,7 @@ class FileBackend(MemoryBackend):
                 entry.updated_at = datetime.now()
                 if tags:
                     entry.tags = tags
-                if ttl:
+                if ttl is not None:
                     entry.ttl = ttl
             else:
                 self._cache[key] = MemoryEntry(
@@ -250,6 +253,11 @@ class FileBackend(MemoryBackend):
     
     def keys(self) -> List[str]:
         with self._lock:
+            expired = [k for k, v in self._cache.items() if v.is_expired()]
+            for k in expired:
+                del self._cache[k]
+            if expired:
+                self._save()
             return list(self._cache.keys())
 
 
